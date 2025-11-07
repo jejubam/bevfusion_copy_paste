@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <div align="center">
   <img src="resources/mmdet3d-logo.png" width="600"/>
   <div>&nbsp;</div>
@@ -408,3 +409,6 @@ This project is released under the [Apache 2.0 license](LICENSE).
 - [MMagic](https://github.com/open-mmlab/mmagic): Open**MM**Lab **A**dvanced, **G**enerative and **I**ntelligent **C**reation toolbox.
 - [MMGeneration](https://github.com/open-mmlab/mmgeneration): OpenMMLab image and video generative models toolbox.
 - [MMDeploy](https://github.com/open-mmlab/mmdeploy): OpenMMLab model deployment framework.
+=======
+# bevfusion_copy_paste
+>>>>>>> 11736c4532783259fa084c7b2f47c55071a2ffb3
