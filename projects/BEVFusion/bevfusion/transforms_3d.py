@@ -600,7 +600,6 @@ class CutAndPaste(BaseTransform):
     # transform() : 최종 augmentation
     # ---------------------------------------------------------
     def transform(self, results):
-
         if self.disabled:
             return results
 
@@ -620,9 +619,9 @@ class CutAndPaste(BaseTransform):
         if sampled is None:
             return results
 
-        sel_box = sampled['gt_bboxes_3d']   # (1,7)
+        sel_box = sampled['gt_bboxes_3d']   
         sel_points = sampled['points']
-        sel_label = sampled['gt_labels_3d']
+        sel_label = sampled['gt_labels_3d'].reshape(-1)
 
         # 2) pointcloud 업데이트
         pts = self.remove_points_in_boxes(results['points'], sel_box)
@@ -633,7 +632,7 @@ class CutAndPaste(BaseTransform):
         results['gt_labels_3d'] = np.concatenate(
             [results['gt_labels_3d'], sel_label], axis=0
         )
-
+        
         # -----------------------------------------------------
         # 3) Image Cut-Paste
         # -----------------------------------------------------
@@ -654,7 +653,7 @@ class CutAndPaste(BaseTransform):
 
         # 3-2) Target 이미지(results)
         tgt_np = results['img'][0]  # numpy
-        tgt_img = Image.fromarray(tgt_np)
+        tgt_img = Image.fromarray(tgt_np.astype(np.uint8))
         tgt_W, tgt_H = tgt_img.size
 
         tgt_info = self.data_info['data_list'][sidx]['images'][self.cam_name]
@@ -688,5 +687,27 @@ class CutAndPaste(BaseTransform):
 
         # numpy로 되돌리기
         results['img'][0] = np.array(tgt_out)
+        
+        # TODO Optional
+        # try:
+        #     base_name = f"epoch_{self.epoch:02d}_{results['sample_idx']}"
+
+        #     # --- Image 저장 ---
+        #     img_np = results['img'][0].astype(np.uint8)
+        #     np.save(f"{self.log_dir}/{base_name}_img.npy", img_np)
+
+        #     # --- Points 저장 ---
+        #     pts_np = results['points'].tensor.numpy().astype(np.float32)
+        #     np.save(f"{self.log_dir}/{base_name}_points.npy", pts_np)
+
+        #     # --- 3D Bboxes 저장 ---
+        #     box_np = results['gt_bboxes_3d'].tensor.numpy().astype(np.float32)
+        #     np.save(f"{self.log_dir}/{base_name}_bboxes.npy", box_np)
+
+        #     # --- Binary 저장 (optional) ---
+        #     # pts_np.tofile(f"{self.log_dir}/{base_name}.bin")
+
+        # except Exception as e:
+        #     print(f"[CutAndPaste] Save failed for sample_idx={results['sample_idx']}: {e}")
 
         return results
