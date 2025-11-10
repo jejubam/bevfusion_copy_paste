@@ -401,6 +401,7 @@ class DataBaseSampler(object):
 
         return ret
     
+    # TODO Sample One Index
     def sample_idx(self,
                    db_path) -> dict:
         
@@ -434,7 +435,7 @@ class DataBaseSampler(object):
         ret = {
             'gt_labels_3d': gt_labels,
             'gt_bboxes_3d': sampled_gt_bboxes,
-            'points': s_points_list[0].cat(s_points_list),  # 전체 합본
+            'points': s_points_list[0].cat(s_points_list),
         }
 
         return ret

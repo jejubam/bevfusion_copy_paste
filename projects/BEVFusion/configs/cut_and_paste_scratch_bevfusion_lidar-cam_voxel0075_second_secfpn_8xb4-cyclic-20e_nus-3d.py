@@ -114,7 +114,7 @@ train_pipeline = [
         with_bbox_3d=True,
         with_label_3d=True,
         with_attr_label=False),
-    dict(type='CutAndPaste', db_sampler=db_sampler, log_dir_path = 'logs'),
+    dict(type='CutAndPaste', db_sampler=db_sampler, log_dir_path = 'logs', data_info_path='/home/donguk/mmdetection3d/data/nuscenes/nuscenes_bevfusion_infos_train.pkl'),
     dict(
         type='ImageAug3D',
         final_dim=[256, 704],

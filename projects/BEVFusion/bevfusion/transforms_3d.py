@@ -8,6 +8,7 @@ from mmdet3d.datasets import GlobalRotScaleTrans
 from mmdet3d.registry import TRANSFORMS
 
 from typing import List, Tuple, Union, Dict, Any, Optional
+import random, pickle, os
 
 MapType = Dict[int, List[Tuple[str, list]]]
 
@@ -421,51 +422,63 @@ class PedObjectSample(BaseTransform):
         # points_np.tofile(f"{self.log_dir}/{base_name}.bin")
 
         return results
-    
-# TODO Ped ObjectSample
+
 @TRANSFORMS.register_module()
 class CutAndPaste(BaseTransform):
-    def __init__(self, db_sampler, log_dir_path='logs', image_size=(1600,900),
-                 cam_name='CAM_FRONT', sample_2d=False, use_ground_plane=False):
+    def __init__(self,
+                 db_sampler,
+                 log_dir_path='logs',
+                 image_size=(1600, 900),
+                 cam_name='CAM_FRONT',
+                 data_info_path=None):
+
         super().__init__()
-        self.sampler_cfg = db_sampler
+
+        # db_sampler 준비
         if 'type' not in db_sampler:
             db_sampler['type'] = 'DataBaseSampler'
         self.db_sampler = TRANSFORMS.build(db_sampler)
-        self.sample_2d = sample_2d
-        self.use_ground_plane = use_ground_plane
+
         self.disabled = False
-        self.image_size = image_size
         self.cam_name = cam_name
+        self.image_size = image_size
         self.log_dir = log_dir_path
         self.epoch = 0
         self.log_path = os.path.join(self.log_dir, "pedobject_epoch_00.jsonl")
 
-        # 인덱스/맵 캐시 (현재 프로세스에서만 유지)
-        self._map_cache: Optional[MapType] = None
-        self._map_src_mtime: Optional[float] = None
+        os.makedirs(self.log_dir, exist_ok=True)
 
-    def set_epoch(self, epoch: int):
-        self.epoch = epoch
-        self.log_path = os.path.join(self.log_dir, f"pedobject_epoch_{epoch:02d}.jsonl")
-        # 에폭 변경 시 캐시 무효화
+        # log 매핑 캐시
         self._map_cache = None
         self._map_src_mtime = None
 
-    # --- 경량 캐시 빌드: 파일 전체 1패스, 필요한 필드만 저장 ---
+        # data_info는 init에서 1회만 로드 → (중요)
+        assert data_info_path is not None
+        with open(data_info_path, "rb") as f:
+            self.data_info = pickle.load(f)
+
+    # ---------------------------------------------------------
+    # Log 매핑 캐시
+    # ---------------------------------------------------------
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+        self.log_path = os.path.join(
+            self.log_dir, f"pedobject_epoch_{epoch:02d}.jsonl")
+        self._map_cache = None
+        self._map_src_mtime = None
+
     def _ensure_map_cache(self):
         jp = self.log_path
         if not os.path.exists(jp):
             self._map_cache = {}
-            self._map_src_mtime = None
             return
 
         src_m = os.path.getmtime(jp)
-        if (self._map_cache is not None) and (self._map_src_mtime == src_m):
-            return  # 최신
+        if self._map_cache is not None and self._map_src_mtime == src_m:
+            return
 
-        mapping: MapType = {}
-        with open(jp, "r", encoding="utf-8") as f:
+        mapping = {}
+        with open(jp, "r") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -473,84 +486,207 @@ class CutAndPaste(BaseTransform):
                 try:
                     rec = json.loads(line)
                     sidx = int(rec.get("sample_idx"))
-                    added = rec.get("added_object", {}) or {}
-                    db_path = added.get("db_path")
+                    added = rec.get("added_object", {})
+                    dbp = added.get("db_path")
                     box3d = added.get("box3d_lidar")
-                    if (db_path is None) or (box3d is None):
+                    if dbp is None or box3d is None:
                         continue
-                    mapping.setdefault(sidx, []).append((db_path, box3d))
-                except Exception:
-                    # 손상 라인은 무시
+                    mapping.setdefault(sidx, []).append((dbp, box3d))
+                except:
                     continue
 
         self._map_cache = mapping
         self._map_src_mtime = src_m
 
-    def _lookup(self, sample_idx: int) -> Union[Tuple[str, list], List[Tuple[str, list]], None]:
+    def _lookup(self, sample_idx):
         self._ensure_map_cache()
-        if not self._map_cache:
-            return None
-        hits = self._map_cache.get(int(sample_idx))
+        hits = self._map_cache.get(int(sample_idx), None)
         if not hits:
             return None
         return hits[0] if len(hits) == 1 else hits
-    
+
+    # ---------------------------------------------------------
+    # Utility : remove points inside 3D box
+    # ---------------------------------------------------------
     @staticmethod
-    def remove_points_in_boxes(points: BasePoints,
-                               boxes: np.ndarray) -> np.ndarray:
-        """Remove the points in the sampled bounding boxes.
-
-        Args:
-            points (:obj:`BasePoints`): Input point cloud array.
-            boxes (np.ndarray): Sampled ground truth boxes.
-
-        Returns:
-            np.ndarray: Points with those in the boxes removed.
-        """
-        masks = box_np_ops.points_in_rbbox(points.coord.numpy(), boxes)
-        points = points[np.logical_not(masks.any(-1))]
+    def remove_points_in_boxes(points: BasePoints, boxes: np.ndarray):
+        mask = box_np_ops.points_in_rbbox(points.coord.numpy(), boxes)
+        points = points[np.logical_not(mask.any(-1))]
         return points
-    
+
+    # ---------------------------------------------------------
+    # get 8 corners of 3D box
+    # ---------------------------------------------------------
+    @staticmethod
+    def get_corners(box):
+        cx, cy, z0, dx, dy, dz, yaw = box[:7]
+        z1 = z0 + dz
+        xh, yh = dx / 2, dy / 2
+
+        base = np.array([
+            [xh,  yh, z0],
+            [xh, -yh, z0],
+            [-xh, -yh, z0],
+            [-xh,  yh, z0],
+            [xh,  yh, z1],
+            [xh, -yh, z1],
+            [-xh, -yh, z1],
+            [-xh,  yh, z1]
+        ])
+
+        c, s = np.cos(yaw), np.sin(yaw)
+        R = np.array([[c, -s],
+                      [s,  c]])
+        xy = base[:, :2] @ R.T
+        xy[:, 0] += cx
+        xy[:, 1] += cy
+
+        out = np.zeros_like(base)
+        out[:, :2] = xy
+        out[:, 2] = base[:, 2]
+        return out
+
+    # ---------------------------------------------------------
+    # Projection
+    # ---------------------------------------------------------
+    @staticmethod
+    def project(corners, lidar2cam, K):
+        homo = np.concatenate([corners, np.ones((8, 1))], axis=1)
+        cam = (lidar2cam @ homo.T).T
+        X, Y, Z = cam[:, 0], cam[:, 1], cam[:, 2]
+        valid = Z > 1e-6
+
+        uvw = K @ np.stack([X, Y, Z], axis=0)
+        u = uvw[0] / (uvw[2] + 1e-12)
+        v = uvw[1] / (uvw[2] + 1e-12)
+
+        u = np.where(valid, u, np.nan)
+        v = np.where(valid, v, np.nan)
+        return u, v
+
+    # ---------------------------------------------------------
+    # bbox clamp
+    # ---------------------------------------------------------
+    @staticmethod
+    def clamp(x1, y1, x2, y2, W, H):
+        x1 = max(0, min(W - 1, x1))
+        x2 = max(0, min(W - 1, x2))
+        y1 = max(0, min(H - 1, y1))
+        y2 = max(0, min(H - 1, y2))
+        return int(x1), int(y1), int(x2), int(y2)
+
+    # ---------------------------------------------------------
+    # feather blending
+    # ---------------------------------------------------------
+    @staticmethod
+    def feather_blend(target_img, patch, x1, y1, radius=10):
+        tgt_np = np.array(target_img).astype(np.float32)
+        patch_np = np.array(patch).astype(np.float32)
+
+        h, w = patch_np.shape[:2]
+
+        yy, xx = np.mgrid[0:h, 0:w]
+        dist = np.minimum(np.minimum(xx, w - 1 - xx),
+                          np.minimum(yy, h - 1 - yy))
+        mask = np.clip(dist / float(radius), 0.0, 1.0)[..., None]
+
+        out = tgt_np.copy()
+        region = out[y1:y1 + h, x1:x1 + w, :]
+        blended = region * (1 - mask) + patch_np * mask
+        out[y1:y1 + h, x1:x1 + w, :] = blended
+        return Image.fromarray(out.astype(np.uint8))
+
+    # ---------------------------------------------------------
+    # transform() : 최종 augmentation
+    # ---------------------------------------------------------
     def transform(self, results):
+
         if self.disabled:
             return results
 
-        # Log에 위치한 Image <-> Object Mapping
-        results_index = results.get("sample_idx", None)
-        
-        hit = self._lookup(results_index)
-        
+        # 1) log lookup → db_path, box3d 가져오기
+        sidx = results.get("sample_idx", None)
+        hit = self._lookup(sidx)
         if hit is None:
             return results
-        
-        # 해당 객체 sample get
-        sampled = self.db_sampler.sample_idx(hit[0])
+
+        if isinstance(hit, list):
+            db_path, box3d = random.choice(hit)
+        else:
+            db_path, box3d = hit
+
+        # sample from db
+        sampled = self.db_sampler.sample_idx(db_path)
         if sampled is None:
             return results
 
-        boxes3d = sampled['gt_bboxes_3d']
-
-        # 하나만 선택
-        sel_box = boxes3d
+        sel_box = sampled['gt_bboxes_3d']   # (1,7)
         sel_points = sampled['points']
-        sel_label = np.array(sampled['gt_labels_3d']).reshape(-1)
+        sel_label = sampled['gt_labels_3d']
 
-        # 기존 points/bbox/label 업데이트
-        points = self.remove_points_in_boxes(results['points'], sel_box)
-        results['points'] = points.cat([sel_points, points])
+        # 2) pointcloud 업데이트
+        pts = self.remove_points_in_boxes(results['points'], sel_box)
+        results['points'] = pts.cat([sel_points, pts])
         results['gt_bboxes_3d'] = results['gt_bboxes_3d'].new_box(
-            np.concatenate([results['gt_bboxes_3d'].numpy(), sel_box]))
+            np.concatenate([results['gt_bboxes_3d'].numpy(), sel_box])
+        )
         results['gt_labels_3d'] = np.concatenate(
-            [results['gt_labels_3d'], sel_label], axis=0)
+            [results['gt_labels_3d'], sel_label], axis=0
+        )
 
-        # Save points/bboxes as numpy
-        # points_np = results['points'].tensor.numpy().astype(np.float32)
-        # boxes_np = results['gt_bboxes_3d'].tensor.numpy().astype(np.float32)
-        # base_name = f"epoch_{self.epoch:02d}_{results['sample_idx']}"
-        # np.save(f"{self.log_dir}/{base_name}_points.npy", points_np)
-        # np.save(f"{self.log_dir}/{base_name}_bboxes.npy", boxes_np)
-        
-        # # or binary format
-        # points_np.tofile(f"{self.log_dir}/{base_name}.bin")
+        # -----------------------------------------------------
+        # 3) Image Cut-Paste
+        # -----------------------------------------------------
+
+        # 3-1) Source 이미지 찾기
+        src_sample_idx = int(db_path.split('/')[1].split('_')[0])
+        src_info = self.data_info['data_list'][src_sample_idx]['images'][self.cam_name]
+
+        src_path = os.path.join(
+            "/home/donguk/mmdetection3d/data/nuscenes/samples",
+            self.cam_name, src_info['img_path']
+        )
+        src_img = Image.open(src_path).convert("RGB")
+        src_W, src_H = src_img.size
+
+        K_S = np.array(src_info['cam2img'])
+        l2c_S = np.array(src_info['lidar2cam'])
+
+        # 3-2) Target 이미지(results)
+        tgt_np = results['img'][0]  # numpy
+        tgt_img = Image.fromarray(tgt_np)
+        tgt_W, tgt_H = tgt_img.size
+
+        tgt_info = self.data_info['data_list'][sidx]['images'][self.cam_name]
+        K_T = np.array(tgt_info['cam2img'])
+        l2c_T = np.array(tgt_info['lidar2cam'])
+
+        # 3D corners
+        corners = self.get_corners(np.array(box3d[0]))
+
+        # 3-3) target bbox
+        uT, vT = self.project(corners, l2c_T, K_T)
+        finite = np.isfinite(uT) & np.isfinite(vT)
+        x1T, y1T = uT[finite].min(), vT[finite].min()
+        x2T, y2T = uT[finite].max(), vT[finite].max()
+        x1T, y1T, x2T, y2T = self.clamp(x1T, y1T, x2T, y2T, tgt_W, tgt_H)
+
+        # 3-4) source bbox
+        uS, vS = self.project(corners, l2c_S, K_S)
+        finite = np.isfinite(uS) & np.isfinite(vS)
+        x1S, y1S = uS[finite].min(), vS[finite].min()
+        x2S, y2S = uS[finite].max(), vS[finite].max()
+        x1S, y1S, x2S, y2S = self.clamp(x1S, y1S, x2S, y2S, src_W, src_H)
+
+        # crop + resize
+        patch = src_img.crop((x1S, y1S, x2S, y2S))
+        Tw, Th = x2T - x1T, y2T - y1T
+        patch_resized = patch.resize((Tw, Th))
+
+        # feather blending
+        tgt_out = self.feather_blend(tgt_img, patch_resized, x1T, y1T, radius=10)
+
+        # numpy로 되돌리기
+        results['img'][0] = np.array(tgt_out)
 
         return results

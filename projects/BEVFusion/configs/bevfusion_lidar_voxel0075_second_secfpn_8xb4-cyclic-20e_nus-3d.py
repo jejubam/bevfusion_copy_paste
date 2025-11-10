@@ -89,7 +89,7 @@ model = dict(
         auxiliary=True,
         in_channels=512,
         hidden_channel=128,
-        num_classes=10,
+        num_classes=1,  # change num_classes to 10 for nuScenes
         nms_kernel_size=3,
         bn_momentum=0.1,
         num_decoder_layers=1,
@@ -223,8 +223,7 @@ train_pipeline = [
     dict(
         type='ObjectNameFilter',
         classes=[
-            'car', 'truck', 'construction_vehicle', 'bus', 'trailer',
-            'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+            'pedestrian'
         ]),
     dict(type='PointShuffle'),
     dict(
@@ -318,7 +317,7 @@ val_evaluator = dict(
 test_evaluator = val_evaluator
 
 vis_backends = [dict(type='LocalVisBackend'),
-                # dict(type='WandbVisBackend')
+                dict(type='WandbVisBackend')
                 ]
 visualizer = dict(
     type='Det3DLocalVisualizer', vis_backends=vis_backends, name='visualizer')
@@ -387,5 +386,5 @@ log_processor = dict(window_size=50)
 default_hooks = dict(
     logger=dict(type='LoggerHook', interval=50),
     checkpoint=dict(type='CheckpointHook', interval=5),
-    visualization=dict(type='Det3DVisualizationHook', draw=True))
+    visualization=dict(type='Det3DVisualizationHook', draw=False))
 custom_hooks = [dict(type='DisableObjectSampleHook', disable_after_epoch=15)]
